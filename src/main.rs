@@ -14,10 +14,13 @@ use walkdir::WalkDir;
 const HELP_COMMANDS: [&str; 3] = ["-h", "--help", "help"];
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const PORT: u16 = 8370; // concat(value of 'S', value of 'F')
+const VERSION: u8 = 2;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 // net packet format:
+// * "sf-"
+// * version: u8
 // * file list len: u32
 // * for each file:
 //   * file len: u32
@@ -28,7 +31,7 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 fn send<P: AsRef<Path> + std::fmt::Debug>(ip: &str, files: &[P]) -> Result<()> {
     // calculate file list buffer
-    let mut buffer = vec![0u8, 0, 0, 0];
+    let mut buffer = vec![b's', b'f', b'-', VERSION, 0, 0, 0, 0];
 
     for file in files {
         let file_len: u32 = fs::metadata(file)?.len().try_into()?;
@@ -48,7 +51,7 @@ fn send<P: AsRef<Path> + std::fmt::Debug>(ip: &str, files: &[P]) -> Result<()> {
     }
 
     let buffer_len: u32 = buffer.len().try_into()?;
-    buffer[0..4].copy_from_slice(&buffer_len.to_le_bytes());
+    buffer[4..8].copy_from_slice(&buffer_len.to_le_bytes());
 
     println!("connecting to server {}...", ip);
     let mut stream = TcpStream::connect((ip, PORT))?;
@@ -81,6 +84,15 @@ fn recv() -> Result<()> {
 
     println!("receiving file list...");
     let mut files = Vec::new();
+
+    let mut header_buffer = [0u8; 4];
+    stream.read_exact(&mut header_buffer)?;
+    if &header_buffer[..3] != b"sf-" {
+        return Err(format!("bad header: {:?}", &header_buffer[..3]).into());
+    }
+    if header_buffer[3] != VERSION {
+        return Err(format!("incompatible version: {:?}", header_buffer[3]).into());
+    }
 
     let mut u32_buffer = [0u8; 4];
     stream.read_exact(&mut u32_buffer)?;
