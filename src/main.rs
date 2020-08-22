@@ -14,7 +14,7 @@ use walkdir::WalkDir;
 const HELP_COMMANDS: [&str; 3] = ["-h", "--help", "help"];
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const PORT: u16 = 8370; // concat(value of 'S', value of 'F')
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -23,7 +23,7 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 // * version: u8
 // * file list len: u32
 // * for each file:
-//   * file len: u32
+//   * file len: u64
 //   * name len: u32
 //   * name: [u8]
 // * for each file:
@@ -34,7 +34,7 @@ fn send<P: AsRef<Path> + std::fmt::Debug>(ip: &str, files: &[P]) -> Result<()> {
     let mut buffer = vec![b's', b'f', b'-', VERSION, 0, 0, 0, 0];
 
     for file in files {
-        let file_len: u32 = fs::metadata(file)?.len().try_into()?;
+        let file_len: u64 = fs::metadata(file)?.len().try_into()?;
         buffer.extend(&file_len.to_le_bytes());
 
         let name = file.as_ref().to_string_lossy();
@@ -85,27 +85,29 @@ fn recv() -> Result<()> {
     println!("receiving file list...");
     let mut files = Vec::new();
 
-    let mut header_buffer = [0u8; 4];
-    stream.read_exact(&mut header_buffer)?;
-    if &header_buffer[..3] != b"sf-" {
-        return Err(format!("bad header: {:?}", &header_buffer[..3]).into());
+    let mut u32_buffer = [0u8; 4];
+    let mut u64_buffer = [0u8; 8];
+
+    stream.read_exact(&mut u32_buffer)?;
+    if &u32_buffer[..3] != b"sf-" {
+        return Err(format!("bad header: {:?}", &u32_buffer[..3]).into());
     }
-    if header_buffer[3] != VERSION {
-        return Err(format!("incompatible version: {:?}", header_buffer[3]).into());
+    if u32_buffer[3] != VERSION {
+        return Err(format!("incompatible version: {:?}", u32_buffer[3]).into());
     }
 
-    let mut u32_buffer = [0u8; 4];
     stream.read_exact(&mut u32_buffer)?;
     let buffer_len: usize = u32::from_le_bytes(u32_buffer).try_into()?;
 
-    let mut buffer = vec![0u8; buffer_len - 4];
+    // minus 4 header, 4 buffer len
+    let mut buffer = vec![0u8; buffer_len - 8];
     stream.read_exact(&mut buffer)?;
 
     let mut i = 0;
     while i < buffer.len() {
-        u32_buffer.copy_from_slice(&buffer[i..i + 4]);
-        i += 4;
-        let file_len: usize = u32::from_le_bytes(u32_buffer).try_into()?;
+        u64_buffer.copy_from_slice(&buffer[i..i + 8]);
+        i += 8;
+        let file_len: usize = u64::from_le_bytes(u64_buffer).try_into()?;
 
         u32_buffer.copy_from_slice(&buffer[i..i + 4]);
         i += 4;
