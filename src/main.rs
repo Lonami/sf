@@ -60,8 +60,15 @@ fn send<P: AsRef<Path> + std::fmt::Debug>(ip: &str, files: &[P]) -> Result<()> {
     stream.write_all(&buffer)?;
 
     let mut buffer = vec![0; CHUNK_SIZE];
-    for file in files {
-        println!("sending file {:?}...", file);
+    let file_count = files.len().to_string();
+    for (i, file) in files.into_iter().enumerate() {
+        println!(
+            "[{n:>p$}/{c}] sending file {:?}...",
+            file,
+            n = i,
+            p = file_count.len(),
+            c = file_count
+        );
         let mut file = File::open(file)?;
         while let Ok(n) = file.read(&mut buffer) {
             if n == 0 {
@@ -89,6 +96,7 @@ fn recv() -> Result<()> {
     let mut u64_buffer = [0u8; 8];
 
     stream.read_exact(&mut u32_buffer)?;
+
     if &u32_buffer[..3] != b"sf-" {
         return Err(format!("bad header: {:?}", &u32_buffer[..3]).into());
     }
@@ -122,8 +130,15 @@ fn recv() -> Result<()> {
     let mut created_dirs = HashSet::new();
     let mut buffer = vec![0; CHUNK_SIZE];
 
-    for (mut file_len, path) in files {
-        println!("receiving file {:?}...", path);
+    let file_count = files.len().to_string();
+    for (i, (mut file_len, path)) in files.into_iter().enumerate() {
+        println!(
+            "[{n:>p$}/{c}] receiving file {:?}...",
+            path,
+            n = i,
+            p = file_count.len(),
+            c = file_count
+        );
         if let Some(parent) = path.parent() {
             if created_dirs.insert(parent) {
                 fs::create_dir_all(parent)?;

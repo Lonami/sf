@@ -1,6 +1,6 @@
 [package]
 name = "sf"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Lonami Exo <totufals@hotmail.com>"]
 edition = "2018"
 
