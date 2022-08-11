@@ -62,7 +62,7 @@ pub fn get_ip_addresses() -> io::Result<Vec<IpAddr>> {
                     let addr = unsafe { ipv6.sin6_addr.u.Byte() };
                     result.push(IpAddr::V6(Ipv6Addr::from(*addr)));
                 }
-                family => panic!(format!("invalid socket address family {}", family)),
+                family => panic!("invalid socket address family {}", family),
             }
 
             address_ref = unsafe { address.Next.as_ref() };
