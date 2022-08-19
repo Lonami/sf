@@ -1,9 +1,15 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+#[derive(Clone, Copy, Debug)]
+pub struct Address {
+    pub ip: IpAddr,
+    pub subnet_mask: IpAddr,
+}
+
 /// Returns a list of addresses whose interface is up and can handle packets.
 #[cfg(windows)]
-pub fn get_ip_addresses() -> io::Result<Vec<IpAddr>> {
+pub fn get_ip_addresses() -> io::Result<Vec<Address>> {
     use winapi::shared::ifdef::IfOperStatusUp;
     use winapi::shared::ipifcons::IF_TYPE_SOFTWARE_LOOPBACK;
     use winapi::shared::winerror::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS};
@@ -55,12 +61,20 @@ pub fn get_ip_addresses() -> io::Result<Vec<IpAddr>> {
                 AF_INET => {
                     let ipv4 = unsafe { *(address.Address.lpSockaddr as *const SOCKADDR_IN) };
                     let addr = unsafe { ipv4.sin_addr.S_un.S_addr() };
-                    result.push(IpAddr::V4(Ipv4Addr::from(u32::from_be(*addr))));
+                    let mask = (1u32 << address.OnLinkPrefixLength) - 1;
+                    result.push(Address {
+                        ip: Ipv4Addr::from(addr.to_be()).into(),
+                        subnet_mask: Ipv4Addr::from(mask.to_be()).into(),
+                    });
                 }
                 AF_INET6 => {
                     let ipv6 = unsafe { *(address.Address.lpSockaddr as *const SOCKADDR_IN6) };
                     let addr = unsafe { ipv6.sin6_addr.u.Byte() };
-                    result.push(IpAddr::V6(Ipv6Addr::from(*addr)));
+                    let mask = 1u128 << address.OnLinkPrefixLength;
+                    result.push(Address {
+                        ip: Ipv6Addr::from(*addr).into(),
+                        subnet_mask: Ipv6Addr::from(mask.to_be()).into(),
+                    });
                 }
                 family => panic!("invalid socket address family {}", family),
             }
@@ -77,7 +91,7 @@ pub fn get_ip_addresses() -> io::Result<Vec<IpAddr>> {
 /// Returns a list of addresses whose interface is up and can handle packets.
 #[cfg(not(windows))]
 #[allow(non_camel_case_types)]
-pub fn get_ip_addresses() -> io::Result<Vec<IpAddr>> {
+pub fn get_ip_addresses() -> io::Result<Vec<Address>> {
     use std::ptr;
 
     type in_port_t = u16;
@@ -164,16 +178,26 @@ pub fn get_ip_addresses() -> io::Result<Vec<IpAddr>> {
         match addr.sa_family {
             AF_INET => {
                 let ipv4 = unsafe { *(ifa.ifa_addr as *const sockaddr_in) };
-                let addr = IpAddr::V4(Ipv4Addr::from(u32::from_be(ipv4.sin_addr.s_addr)));
+                let addr = Ipv4Addr::from(ipv4.sin_addr.s_addr.to_be());
                 if !addr.is_loopback() {
-                    result.push(addr);
+                    let ipv4 = unsafe { *(ifa.ifa_netmask as *const sockaddr_in) };
+                    let mask = Ipv4Addr::from(ipv4.sin_addr.s_addr.to_be());
+                    result.push(Address {
+                        ip: addr.into(),
+                        subnet_mask: mask.into(),
+                    });
                 }
             }
             AF_INET6 => {
                 let ipv6 = unsafe { *(ifa.ifa_addr as *const sockaddr_in6) };
-                let addr = IpAddr::V6(Ipv6Addr::from(ipv6.sin6_addr.s6_addr));
+                let addr = Ipv6Addr::from(ipv6.sin6_addr.s6_addr);
                 if !addr.is_loopback() {
-                    result.push(addr);
+                    let ipv6 = unsafe { *(ifa.ifa_netmask as *const sockaddr_in6) };
+                    let mask = Ipv6Addr::from(ipv6.sin6_addr.s6_addr);
+                    result.push(Address {
+                        ip: addr.into(),
+                        subnet_mask: mask.into(),
+                    });
                 }
             }
             _ => {}

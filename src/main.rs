@@ -6,7 +6,7 @@ use std::convert::TryInto;
 use std::error::Error;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::Path;
 use std::process::exit;
 use std::thread;
@@ -104,11 +104,11 @@ fn recv() -> Result<()> {
     let addr = get_ip_addresses().expect("failed to get ip addresses")[0];
     println!(
         "waiting for client on {} (attempting to broadcast own ip)...",
-        addr
+        addr.ip
     );
     let mut stream = {
-        let listener = TcpListener::bind((addr, PORT))?;
-        match survey_potential_clients(&listener) {
+        let listener = TcpListener::bind((addr.ip, PORT))?;
+        match survey_potential_clients(&listener, addr.subnet_mask) {
             Ok(s) => s,
             Err(e) => {
                 println!(
@@ -196,19 +196,23 @@ fn recv() -> Result<()> {
 
 // The alternative would be to use multicast, but broadcasting should work just fine in LAN.
 // (Attempting to broadcast outside the subnet is very likely to just get the packet dropped.)
-fn make_broadcast_addr(addr: SocketAddr) -> SocketAddr {
-    // TODO use associated netmask instead
-    match addr {
-        SocketAddr::V4(addr) => {
+fn make_broadcast_addr(addr: SocketAddr, subnet_mask: IpAddr) -> SocketAddr {
+    match (addr, subnet_mask) {
+        (SocketAddr::V4(addr), IpAddr::V4(mask)) => {
             let mut octets = addr.ip().octets();
-            octets[3] = 255;
+            for (o, m) in octets.iter_mut().zip(mask.octets().iter()) {
+                *o |= !m;
+            }
             SocketAddr::new(Ipv4Addr::from(octets).into(), addr.port())
         }
-        SocketAddr::V6(addr) => {
+        (SocketAddr::V6(addr), IpAddr::V6(mask)) => {
             let mut octets = addr.ip().octets();
-            octets[15] = 255;
+            for (o, m) in octets.iter_mut().zip(mask.octets().iter()) {
+                *o |= !m;
+            }
             SocketAddr::new(Ipv6Addr::from(octets).into(), addr.port())
         }
+        _ => panic!("subnet mask version differs from socket address ip version"),
     }
 }
 
@@ -253,10 +257,10 @@ fn deserialize_socket_addr(buffer: [u8; 20]) -> Result<SocketAddr> {
 
 // Broadcast a signal to survey for potential clients for them to connect via automatic mode.
 // If any of the steps fail, bail, in order to fallback to direct a connection.
-fn survey_potential_clients(listener: &TcpListener) -> Result<TcpStream> {
+fn survey_potential_clients(listener: &TcpListener, subnet_mask: IpAddr) -> Result<TcpStream> {
     let listener_addr = listener.local_addr()?;
     let serliazed_addr = serialize_socket_addr(listener_addr);
-    let listener_net_broadcast_ip = make_broadcast_addr(listener_addr).ip();
+    let listener_net_broadcast_ip = make_broadcast_addr(listener_addr, subnet_mask).ip();
 
     listener.set_nonblocking(true)?;
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, CLIENT_BROADCAST_PORT))?;
