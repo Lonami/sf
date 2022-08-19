@@ -24,6 +24,11 @@ Send files:
 sf <IP> [FILES...]
 ```
 
+The `<IP>` can be set to `auto`.
+The receiver (server) will continuously broadcast UDP packets in the local network with its IP address.
+The sender (client) will listen for those UDP packets when the `<IP>` is set to `auto` in order to find out the server's IP.
+It will then connect to it and proceed as if the server IP had been manually provided.
+
 ## Security considerations
 
 There is no encryption and no checks to the file paths are made. The tool should only be used in LAN you control to quickly move files around computers.
