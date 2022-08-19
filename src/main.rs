@@ -5,18 +5,32 @@ use std::collections::HashSet;
 use std::convert::TryInto;
 use std::error::Error;
 use std::fs::{self, File};
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{self, Read, Write};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::Path;
 use std::process::exit;
+use std::thread;
+use std::time::Duration;
 use walkdir::WalkDir;
 
+// Commands
 const HELP_COMMANDS: [&str; 3] = ["-h", "--help", "help"];
-const CHUNK_SIZE: usize = 4 * 1024 * 1024;
-const PORT: u16 = 8370; // concat(value of 'S', value of 'F')
+const AUTO_IP: &str = "auto";
+
+// Transfer parameters
 const VERSION: u8 = 3;
+const CHUNK_SIZE: usize = 4 * 1024 * 1024;
+const SIGNAL_DELAY: Duration = Duration::from_secs(2);
+
+// Connection addresses
+const PORT: u16 = 8370; // concat(value of 'S', value of 'F')
+const SIGNALING_PORT: u16 = 8369;
+const CLIENT_BROADCAST_PORT: u16 = 38369;
+const LOCAL_BROADCAST: Ipv4Addr = Ipv4Addr::new(127, 255, 255, 255);
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+// === Transfer logic
 
 // net packet format:
 // * "sf-"
@@ -28,8 +42,14 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 //   * name: [u8]
 // * for each file:
 //   * file data: [u8]
-
 fn send<P: AsRef<Path> + std::fmt::Debug>(ip: &str, files: &[P]) -> Result<()> {
+    let addr = if ip == AUTO_IP {
+        println!("attempting to discover the server's ip...");
+        discover_server()?
+    } else {
+        SocketAddr::new(ip.parse()?, PORT)
+    };
+
     // calculate file list buffer
     let mut buffer = vec![b's', b'f', b'-', VERSION, 0, 0, 0, 0];
 
@@ -53,8 +73,8 @@ fn send<P: AsRef<Path> + std::fmt::Debug>(ip: &str, files: &[P]) -> Result<()> {
     let buffer_len: u32 = buffer.len().try_into()?;
     buffer[4..8].copy_from_slice(&buffer_len.to_le_bytes());
 
-    println!("connecting to server {}...", ip);
-    let mut stream = TcpStream::connect((ip, PORT))?;
+    println!("connecting to server {}...", addr);
+    let mut stream = TcpStream::connect(addr)?;
 
     println!("sending file list...");
     stream.write_all(&buffer)?;
@@ -83,10 +103,23 @@ fn send<P: AsRef<Path> + std::fmt::Debug>(ip: &str, files: &[P]) -> Result<()> {
 
 fn recv() -> Result<()> {
     let addr = get_ip_addresses().expect("failed to get ip addresses")[0];
-    println!("waiting for client on {}...", addr);
+    println!(
+        "waiting for client on {} (attempting to broadcast own ip)...",
+        addr
+    );
     let mut stream = {
         let listener = TcpListener::bind((addr, PORT))?;
-        listener.incoming().next().expect("no client connected")?
+        match survey_potential_clients(&listener) {
+            Ok(s) => s,
+            Err(e) => {
+                println!(
+                    "cannot broadcast ip to potential clients, direct ip must be used:\n  {}",
+                    e
+                );
+                listener.set_nonblocking(false).unwrap();
+                listener.accept().expect("no client connected").0
+            }
+        }
     };
 
     println!("receiving file list...");
@@ -159,6 +192,77 @@ fn recv() -> Result<()> {
 
     Ok(())
 }
+
+// === Automatic discovery
+
+fn serialize_socket_addr(addr: SocketAddr) -> [u8; 20] {
+    let mut buffer = [0; 20];
+    match addr {
+        SocketAddr::V4(addr) => {
+            buffer[0] = 4;
+            buffer[1..5].copy_from_slice(&addr.ip().octets());
+            buffer[5..7].copy_from_slice(&addr.port().to_be_bytes());
+        }
+        SocketAddr::V6(addr) => {
+            buffer[0] = 6;
+            buffer[1..17].copy_from_slice(&addr.ip().octets());
+            buffer[17..19].copy_from_slice(&addr.port().to_be_bytes());
+        }
+    }
+    buffer
+}
+
+fn deserialize_socket_addr(buffer: [u8; 20]) -> Result<SocketAddr> {
+    match buffer[0] {
+        4 => {
+            let ip: [u8; 4] = buffer[1..5].try_into().unwrap();
+            let port = buffer[5..7].try_into().unwrap();
+            Ok(SocketAddr::new(
+                Ipv4Addr::from(ip).into(),
+                u16::from_be_bytes(port),
+            ))
+        }
+        6 => {
+            let ip: [u8; 16] = buffer[1..17].try_into().unwrap();
+            let port = buffer[17..19].try_into().unwrap();
+            Ok(SocketAddr::new(
+                Ipv6Addr::from(ip).into(),
+                u16::from_be_bytes(port),
+            ))
+        }
+        _ => Err("invalid socket addr version".into()),
+    }
+}
+
+// Broadcast a signal to survey for potential clients for them to connect via automatic mode.
+// If any of the steps fail, bail, in order to fallback to direct a connection.
+fn survey_potential_clients(listener: &TcpListener) -> Result<TcpStream> {
+    let listener_ip = serialize_socket_addr(listener.local_addr()?);
+    listener.set_nonblocking(true)?;
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, CLIENT_BROADCAST_PORT))?;
+    loop {
+        print!(".");
+        io::stdout().flush().unwrap();
+        match listener.accept() {
+            Ok((s, _)) => break Ok(s),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                socket.send_to(&listener_ip, (LOCAL_BROADCAST, SIGNALING_PORT))?;
+                thread::sleep(SIGNAL_DELAY);
+                continue;
+            }
+            Err(e) => break Err(e.into()),
+        }
+    }
+}
+
+fn discover_server() -> Result<SocketAddr> {
+    let mut buf = [0; 20];
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, SIGNALING_PORT))?;
+    socket.recv_from(&mut buf)?;
+    deserialize_socket_addr(buf)
+}
+
+// === CLI
 
 fn run() -> Result<()> {
     let mut args = std::env::args();
