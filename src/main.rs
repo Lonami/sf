@@ -1,3 +1,4 @@
+mod args;
 mod ip;
 
 use ip::get_ip_addresses;
@@ -7,15 +8,11 @@ use std::error::Error;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::thread;
 use std::time::Duration;
 use walkdir::WalkDir;
-
-// Commands
-const HELP_COMMANDS: [&str; 3] = ["-h", "--help", "help"];
-const AUTO_IP: &str = "auto";
 
 // Transfer parameters
 const VERSION: u8 = 3;
@@ -42,22 +39,15 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 //   * name: [u8]
 // * for each file:
 //   * file data: [u8]
-fn send<P: AsRef<Path> + std::fmt::Debug>(ip: &str, files: &[P]) -> Result<()> {
-    let addr = if ip == AUTO_IP {
-        println!("attempting to discover the server's ip...");
-        discover_server()?
-    } else {
-        SocketAddr::new(ip.parse()?, PORT)
-    };
-
+fn send(addr: SocketAddr, files: Vec<PathBuf>) -> Result<()> {
     // calculate file list buffer
     let mut buffer = vec![b's', b'f', b'-', VERSION, 0, 0, 0, 0];
 
-    for file in files {
+    for file in files.iter() {
         let file_len: u64 = fs::metadata(file)?.len().try_into()?;
         buffer.extend(&file_len.to_le_bytes());
 
-        let name = file.as_ref().to_string_lossy();
+        let name = file.to_string_lossy();
         let name = name.as_bytes();
         let name_len: u32 = name.len().try_into()?;
         buffer.extend(&name_len.to_le_bytes());
@@ -101,7 +91,7 @@ fn send<P: AsRef<Path> + std::fmt::Debug>(ip: &str, files: &[P]) -> Result<()> {
     Ok(())
 }
 
-fn recv() -> Result<()> {
+fn recv(prefix: args::PathPrefix) -> Result<()> {
     let addr = get_ip_addresses().expect("failed to get ip addresses")[0];
     println!(
         "waiting for client on {} (attempting to broadcast own ip)...",
@@ -144,7 +134,11 @@ fn recv() -> Result<()> {
     let mut buffer = vec![0u8; buffer_len - 8];
     stream.read_exact(&mut buffer)?;
 
-    let mut common_prefix = Option::<&[u8]>::None;
+    let mut common_prefix = match prefix {
+        // the common prefix will only ever shorten, so if it starts empty, there won't be any
+        args::PathPrefix::Keep => Some(&buffer[..0]),
+        args::PathPrefix::Strip => None,
+    };
 
     let mut i = 0;
     while i < buffer.len() {
@@ -318,40 +312,35 @@ fn discover_server() -> Result<SocketAddr> {
 
 // === CLI
 
-fn run() -> Result<()> {
-    let mut args = std::env::args();
-    let prog_name = args.next().ok_or("program name missing")?;
+fn run(settings: args::Settings) -> Result<()> {
+    match settings.mode {
+        args::Mode::Sender { ip, files } => {
+            let addr = match ip {
+                args::ServerAddress::Auto => {
+                    println!("attempting to discover the server's ip...");
+                    discover_server()?
+                }
+                args::ServerAddress::Direct(ip) => SocketAddr::new(ip, PORT),
+            };
 
-    if let Some(ip) = args.next() {
-        if HELP_COMMANDS.contains(&ip.as_str()) {
-            println!("sf: send files in LAN quickly");
-            println!();
-            println!("usage (receive files):");
-            println!("  {}", prog_name);
-            println!();
-            println!("usage (send files):");
-            println!("  {} <IP> [FILES...]", prog_name);
-            return Ok(());
-        }
-
-        let mut files = Vec::new();
-        for arg in args {
-            for entry in WalkDir::new(arg) {
-                let entry = entry?;
-                if entry.path().is_file() {
-                    files.push(entry.into_path());
+            let mut paths = Vec::new();
+            for arg in files {
+                for entry in WalkDir::new(arg) {
+                    let entry = entry?;
+                    if entry.path().is_file() {
+                        paths.push(entry.into_path());
+                    }
                 }
             }
-        }
 
-        send(&ip, &files)
-    } else {
-        recv()
+            send(addr, paths)
+        }
+        args::Mode::Receiver { prefix } => recv(prefix),
     }
 }
 
 fn main() {
-    exit(match run() {
+    exit(match run(args::parse()) {
         Ok(_) => 0,
         Err(e) => {
             eprintln!("FATAL: {}", e);
