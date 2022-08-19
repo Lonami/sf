@@ -26,7 +26,6 @@ const SIGNAL_DELAY: Duration = Duration::from_secs(2);
 const PORT: u16 = 8370; // concat(value of 'S', value of 'F')
 const SIGNALING_PORT: u16 = 8369;
 const CLIENT_BROADCAST_PORT: u16 = 38369;
-const LOCAL_BROADCAST: Ipv4Addr = Ipv4Addr::new(127, 255, 255, 255);
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -195,6 +194,24 @@ fn recv() -> Result<()> {
 
 // === Automatic discovery
 
+// The alternative would be to use multicast, but broadcasting should work just fine in LAN.
+// (Attempting to broadcast outside the subnet is very likely to just get the packet dropped.)
+fn make_broadcast_addr(addr: SocketAddr) -> SocketAddr {
+    // TODO use associated netmask instead
+    match addr {
+        SocketAddr::V4(addr) => {
+            let mut octets = addr.ip().octets();
+            octets[3] = 255;
+            SocketAddr::new(Ipv4Addr::from(octets).into(), addr.port())
+        }
+        SocketAddr::V6(addr) => {
+            let mut octets = addr.ip().octets();
+            octets[15] = 255;
+            SocketAddr::new(Ipv6Addr::from(octets).into(), addr.port())
+        }
+    }
+}
+
 fn serialize_socket_addr(addr: SocketAddr) -> [u8; 20] {
     let mut buffer = [0; 20];
     match addr {
@@ -237,7 +254,10 @@ fn deserialize_socket_addr(buffer: [u8; 20]) -> Result<SocketAddr> {
 // Broadcast a signal to survey for potential clients for them to connect via automatic mode.
 // If any of the steps fail, bail, in order to fallback to direct a connection.
 fn survey_potential_clients(listener: &TcpListener) -> Result<TcpStream> {
-    let listener_ip = serialize_socket_addr(listener.local_addr()?);
+    let listener_addr = listener.local_addr()?;
+    let serliazed_addr = serialize_socket_addr(listener_addr);
+    let listener_net_broadcast_ip = make_broadcast_addr(listener_addr).ip();
+
     listener.set_nonblocking(true)?;
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, CLIENT_BROADCAST_PORT))?;
     loop {
@@ -246,7 +266,7 @@ fn survey_potential_clients(listener: &TcpListener) -> Result<TcpStream> {
         match listener.accept() {
             Ok((s, _)) => break Ok(s),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                socket.send_to(&listener_ip, (LOCAL_BROADCAST, SIGNALING_PORT))?;
+                socket.send_to(&serliazed_addr, (listener_net_broadcast_ip, SIGNALING_PORT))?;
                 thread::sleep(SIGNAL_DELAY);
                 continue;
             }
