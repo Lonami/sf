@@ -21,6 +21,7 @@ const AUTO_IP: &str = "auto";
 const VERSION: u8 = 3;
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const SIGNAL_DELAY: Duration = Duration::from_secs(2);
+const PATH_SEPARATORS: [u8; 2] = [b'/', b'\\'];
 
 // Connection addresses
 const PORT: u16 = 8370; // concat(value of 'S', value of 'F')
@@ -122,7 +123,7 @@ fn recv() -> Result<()> {
     };
 
     println!("receiving file list...");
-    let mut files = Vec::new();
+    let mut files = Vec::new(); // (file len, file name)
 
     let mut u32_buffer = [0u8; 4];
     let mut u64_buffer = [0u8; 8];
@@ -143,6 +144,8 @@ fn recv() -> Result<()> {
     let mut buffer = vec![0u8; buffer_len - 8];
     stream.read_exact(&mut buffer)?;
 
+    let mut common_prefix = Option::<&[u8]>::None;
+
     let mut i = 0;
     while i < buffer.len() {
         u64_buffer.copy_from_slice(&buffer[i..i + 8]);
@@ -156,14 +159,41 @@ fn recv() -> Result<()> {
         let name = &buffer[i..i + name_len];
         i += name_len;
 
-        files.push((file_len, Path::new(std::str::from_utf8(name)?)));
+        common_prefix = Some(match common_prefix {
+            None => name,
+            Some(prefix) => {
+                if let Some(equal_up_to) = prefix.iter().zip(name).position(|(x, y)| x != y) {
+                    &prefix[..equal_up_to]
+                } else {
+                    prefix
+                }
+            }
+        });
+
+        files.push((file_len, std::str::from_utf8(name)?));
     }
+
+    let common_prefix = match common_prefix {
+        None => &buffer[..0], // any empty string
+        Some(b) => b,
+    };
+    let common_prefix_len = if let Some(sep_idx) = common_prefix
+        .iter()
+        .rposition(|c| PATH_SEPARATORS.contains(c))
+    {
+        // +1 to exclude the separator itself
+        sep_idx + 1
+    } else {
+        // there is no parent, it's all separate files at the same level, so there is nothing to strip
+        0
+    };
 
     let mut created_dirs = HashSet::new();
     let mut buffer = vec![0; CHUNK_SIZE];
 
     let file_count = files.len().to_string();
-    for (i, (mut file_len, path)) in files.into_iter().enumerate() {
+    for (i, (mut file_len, name)) in files.into_iter().enumerate() {
+        let path = Path::new(&name[common_prefix_len..]);
         println!(
             "[{n:>p$}/{c}] receiving file {:?}...",
             path,
