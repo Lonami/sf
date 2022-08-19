@@ -12,17 +12,26 @@ cargo install --git https://github.com/lonami/sf
 
 ## Usage
 
-Receive files:
+```
+sf: send files in LAN quickly
 
-```sh
-sf
+usage (receive files):
+  sf [OPTIONS...]
+
+available OPTIONS:
+  -h, --help: display this message and exit
+  -s, --strip-prefix: strip the common prefix from the received file paths
+    this is useful when receiving absolute paths from a drive you don't have,
+    since the drive portion will be removed as long as all paths share it
+    default = false
+
+usage (send files):
+  sf <IP> [FILES...]
+
+  IP must be either an IP address or `auto' to enable server discovery
 ```
 
-Send files:
-
-```sh
-sf <IP> [FILES...]
-```
+### How does the automatic server discovery work?
 
 The `<IP>` can be set to `auto`.
 The receiver (server) will continuously broadcast UDP packets in the local network with its IP address.
