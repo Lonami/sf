@@ -1,3 +1,7 @@
+Moved to https://codeberg.org/Lonami/sf. The GitHub repository may be deleted in the future.
+
+---
+
 # sf
 
 Send Files in LAN quickly.
